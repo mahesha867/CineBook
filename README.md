@@ -91,7 +91,6 @@ CineBook/
 │   ├── Booking.java           # Record: booking details, discount calculation, summaries
 │   ├── Theatre.java           # Domain service: orchestration and active bookings
 │   └── CineApp.java           # Entry point: console menu loop & fail-fast checks
-├── schema.sql                 # Convenience root copy of database/schema.sql
 └── README.md
 ```
 
