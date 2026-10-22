@@ -1,52 +1,66 @@
+import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Theatre.java
  *
- * Central repository for all Shows and Bookings.
+ * Central coordinator for all Shows and Bookings in CineBook.
+ * Backed by TheatreDao for MySQL persistence and ACID transactions.
  *
  * Responsibilities:
- *   - Seed and expose the list of available shows.
- *   - Record every confirmed booking in an ArrayList<Booking>.
- *   - Handle cancellation lookups and enforce the one-cancel rule.
- *   - Delegate actual seat-grid changes to Show (Bookable).
+ *   - Load and expose the list of available shows and live seat grids.
+ *   - Load and record bookings from MySQL.
+ *   - Coordinate booking creation and cancellation through TheatreDao.
+ *   - Format and display active bookings and show schedules.
  */
 public class Theatre {
 
     // ------------------------------------------------------------------ //
     private final String         name;
+    private final TheatreDao     dao;
     private final List<Show>     shows;
     private final List<Booking>  bookings;
 
     // ------------------------------------------------------------------ //
-    // Constructor
+    // Constructors
     // ------------------------------------------------------------------ //
-    public Theatre(String name) {
+    public Theatre(String name, TheatreDao dao) throws SQLException {
         this.name     = name;
+        this.dao      = dao != null ? dao : new TheatreDao();
         this.shows    = new ArrayList<>();
         this.bookings = new ArrayList<>();
-        seedShows();
+        initFromDatabase();
+    }
+
+    public Theatre(String name) throws SQLException {
+        this(name, new TheatreDao());
     }
 
     // ------------------------------------------------------------------ //
-    // Seed data
+    // Database Initialization
     // ------------------------------------------------------------------ //
+    private void initFromDatabase() throws SQLException {
+        // Idempotently ensure shows and 40 seats each exist in MySQL
+        dao.ensureSeeded();
 
-    /** Populates the theatre with at least three shows at start-up. */
-    private void seedShows() {
-        shows.add(new Show("Inception",       "10:30 AM"));
-        shows.add(new Show("Interstellar",    "02:00 PM"));
-        shows.add(new Show("The Dark Knight", "06:45 PM"));
-        shows.add(new Show("Oppenheimer",     "09:30 PM"));
+        // Load shows with their live seat maps
+        shows.clear();
+        shows.addAll(dao.getAllShows());
+
+        // Load existing bookings
+        bookings.clear();
+        bookings.addAll(dao.getAllBookings(shows));
     }
 
     // ------------------------------------------------------------------ //
     // Getters
     // ------------------------------------------------------------------ //
-    public String       getName()     { return name;     }
-    public List<Show>   getShows()    { return shows;    }
-    public List<Booking> getBookings(){ return bookings; }
+    public String        getName()     { return name;     }
+    public List<Show>    getShows()    { return shows;    }
+    public List<Booking> getBookings() { return bookings; }
 
     // ------------------------------------------------------------------ //
     // Show listing
@@ -70,24 +84,18 @@ public class Theatre {
     // ------------------------------------------------------------------ //
 
     /**
-     * Creates and records a booking for the given show and seat codes.
-     * Passes an optional coupon code to the Booking constructor.
+     * Creates and records a booking in a MySQL transaction.
      *
      * @param show       the chosen show
      * @param seatCodes  seats the user wants to book
      * @param couponCode coupon entered by the user (may be empty or invalid)
-     * @return the new Booking object
-     * @throws IllegalArgumentException propagated from Show.bookSeats()
+     * @return the confirmed Booking object
+     * @throws IllegalArgumentException on validation failure, seat conflict, or duplicate
      */
     public Booking makeBooking(Show show, String[] seatCodes, String couponCode) {
-        // Delegate grid changes to the Show; receive normalised seat codes back.
-        // Show.bookSeats() throws if anything is invalid (all-or-nothing).
-        String[] normCodes = show.bookSeats(seatCodes);
+        Booking booking = dao.makeBooking(show, seatCodes, couponCode);
 
-        // Create exactly one Booking – the sole consumer of one counter ID.
-        Booking booking = new Booking(show, normCodes, couponCode);
-
-        // Warn the user if the coupon they entered was not recognised
+        // Warn the user if the coupon entered was not recognised
         if (!couponCode.isEmpty() && booking.getCouponUsed().isEmpty()) {
             System.out.printf(
                     "%n  [!] Coupon '%s' is not valid - full price applied.%n%n",
@@ -103,37 +111,33 @@ public class Theatre {
     // ------------------------------------------------------------------ //
 
     /**
-     * Looks up a booking by ID and cancels it.
-     *
-     * Rules enforced:
-     *   1. The booking ID must exist.
-     *   2. The booking must not have been cancelled already.
-     * If valid, delegates seat-freeing to Show.cancelBooking() and marks
-     * the booking as cancelled.
+     * Cancels a booking in a MySQL transaction and updates in-memory state.
      *
      * @param bookingId the ID entered by the user
-     * @return the cancelled Booking so the caller can print a receipt
+     * @return the cancelled Booking object
      * @throws IllegalArgumentException if not found or already cancelled
      */
     public Booking cancelBooking(String bookingId) {
+        Map<Integer, Show> showMap = new HashMap<>();
+        for (Show s : shows) {
+            showMap.put(s.getShowId(), s);
+        }
+
+        Booking cancelled = dao.cancelBooking(bookingId, showMap);
+
+        // Update local booking in list if present
         for (Booking b : bookings) {
             if (b.getBookingId().equalsIgnoreCase(bookingId.trim())) {
-                if (b.isCancelled()) {
-                    throw new IllegalArgumentException(
-                            "Booking " + bookingId + " has already been cancelled.");
-                }
-                // Delegate seat-freeing to the Show
-                b.getShow().cancelBooking(b);
                 b.setCancelled(true);
-                return b;
+                break;
             }
         }
-        throw new IllegalArgumentException(
-                "No booking found with ID: " + bookingId.trim());
+
+        return cancelled;
     }
 
     // ------------------------------------------------------------------ //
-    // Active bookings listing (optional convenience)
+    // Active bookings listing
     // ------------------------------------------------------------------ //
 
     /** Prints all active (non-cancelled) bookings. */

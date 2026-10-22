@@ -1,28 +1,75 @@
 # 🎬 CineBook
 
-A Java console application for booking movie tickets at a single-screen cinema. Built as an OOP fundamentals exercise covering enums, interfaces, 2D arrays, method overloading, and ArrayList usage.
+A Java console application for booking movie tickets at a single-screen cinema, backed by a persistent MySQL relational database. Built following OOP and Data Access Object (DAO) principles, covering JDBC transactions, row-level locking (`SELECT ... FOR UPDATE`), collision-safe ID generation, enums, interfaces, and graceful error handling.
 
 ---
 
 ## Features
 
-- 🎥 **4 available shows** — choose from Inception, Interstellar, The Dark Knight, and Oppenheimer
-- 🪑 **Interactive seat map** — 5×8 grid (rows A–E, columns 1–8) with live `O`/`X` status
-- 💰 **Three seat categories** — prices read from a `SeatType` enum (never hard-coded)
-- 🔒 **All-or-nothing booking** — every seat in a request is validated before any seat is reserved
-- 🎟️ **Coupon support** — `CINE10` applies a 10% discount via overloaded `calculateTotal()`
-- ❌ **Cancellation with 80% refund** — frees the seats and prevents duplicate cancellations
-- 🛡️ **Graceful error handling** — bad menu choices, invalid codes, and already-booked seats all produce clear messages without crashing
+- 🎥 **4 available shows** — Inception, Interstellar, The Dark Knight, and Oppenheimer persisted in MySQL.
+- 🪑 **Interactive seat map** — 5×8 grid (rows A–E, columns 1–8) with live `O` (available) and `X` (booked) status loaded from MySQL.
+- 💰 **Three seat categories** — prices derived from the `SeatType` enum (never stored in the database).
+- 🔒 **ACID database transactions** — all requested seat codes in a booking are validated and committed atomically; failures roll back completely.
+- 🛡️ **Concurrency-safe seat reservation** — uses row-level locking (`SELECT ... FOR UPDATE`) sorted deterministically to prevent duplicate bookings and deadlocks.
+- 🎟️ **Coupon support** — `CINE10` applies a 10% discount via overloaded `calculateTotal()` / `computeTotal()`.
+- ❌ **Transactional cancellation with 80% refund** — frees reserved seats, marks the booking cancelled, and rejects duplicate cancellations.
+- 🔑 **Collision-safe booking IDs** — database-generated sequence preserving the `CB1001` display format without relying on in-memory counters.
+- ⚡ **Idempotent seeding** — rerunning the application or schema script initializes missing shows and seats without duplicates.
+- 🛑 **Fail-fast connectivity** — clear diagnostic console errors if the database is unavailable or misconfigured, preventing silent fallback to memory-only state.
 
 ---
 
 ## Seat Pricing
 
-| Rows | Category | Price      |
-|------|----------|------------|
-| A–B  | REGULAR  | Rs. 150    |
-| C–D  | PREMIUM  | Rs. 250    |
-| E    | VIP      | Rs. 400    |
+Prices are determined solely by the `SeatType` Java enum:
+
+| Rows | Category | Price   |
+|------|----------|---------|
+| A–B  | REGULAR  | Rs. 150 |
+| C–D  | PREMIUM  | Rs. 250 |
+| E    | VIP      | Rs. 400 |
+
+---
+
+## Database Architecture
+
+### Schema: `cinebook`
+
+The database consists of 4 core tables plus a sequence generator:
+
+1. **`shows`**
+   - `show_id` (INT AUTO_INCREMENT PRIMARY KEY)
+   - `movie_name` (VARCHAR(100) NOT NULL)
+   - `show_time` (VARCHAR(20) NOT NULL)
+   - `UNIQUE KEY uk_show_movie_time (movie_name, show_time)`
+
+2. **`booking_seq`**
+   - `id` (INT AUTO_INCREMENT PRIMARY KEY, AUTO_INCREMENT = 1001)
+   - Used to generate collision-safe IDs formatted as `CB1001`, `CB1002`, etc.
+
+3. **`bookings`**
+   - `booking_id` (VARCHAR(20) PRIMARY KEY)
+   - `show_id` (INT NOT NULL, FK -> `shows.show_id`)
+   - `amount_paid` (DECIMAL(10, 2) NOT NULL)
+   - `coupon` (VARCHAR(50) DEFAULT NULL)
+   - `is_cancelled` (BOOLEAN NOT NULL DEFAULT FALSE)
+   - `created_at` (TIMESTAMP DEFAULT CURRENT_TIMESTAMP)
+
+4. **`seats`**
+   - `seat_id` (INT AUTO_INCREMENT PRIMARY KEY)
+   - `show_id` (INT NOT NULL, FK -> `shows.show_id`)
+   - `seat_row` (CHAR(1) NOT NULL)
+   - `seat_number` (INT NOT NULL)
+   - `is_booked` (BOOLEAN NOT NULL DEFAULT FALSE)
+   - `booking_id` (VARCHAR(20) DEFAULT NULL, FK -> `bookings.booking_id`)
+   - `UNIQUE KEY uk_show_seat (show_id, seat_row, seat_number)`
+
+5. **`booking_seats`**
+   - `id` (INT AUTO_INCREMENT PRIMARY KEY)
+   - `booking_id` (VARCHAR(20) NOT NULL, FK -> `bookings.booking_id`)
+   - `seat_row` (CHAR(1) NOT NULL)
+   - `seat_number` (INT NOT NULL)
+   - `UNIQUE KEY uk_booking_seat (booking_id, seat_row, seat_number)`
 
 ---
 
@@ -30,124 +77,186 @@ A Java console application for booking movie tickets at a single-screen cinema. 
 
 ```
 CineBook/
+├── database/
+│   └── schema.sql             # MySQL schema and idempotent seed script
+├── lib/
+│   └── mysql-connector-j-8.3.0.jar # MySQL Connector/J JDBC driver
+├── out/                       # Compiled .class files (generated)
 ├── src/
-│   ├── SeatType.java     # Enum: REGULAR, PREMIUM, VIP with prices
-│   ├── Bookable.java     # Interface: bookSeats(), cancelBooking()
-│   ├── Show.java         # Entity: 2D seat grid, seat-map display, all-or-nothing booking
-│   ├── Booking.java      # Record: booking ID, amount, coupon, cancellation state
-│   ├── Theatre.java      # Aggregator: show list, ArrayList<Booking>, orchestration
-│   └── CineApp.java      # Entry point: main menu, console I/O
-├── out/                  # Compiled .class files (generated)
+│   ├── DatabaseConfig.java    # JDBC connection manager & env variable configuration
+│   ├── TheatreDao.java        # DAO layer: SQL queries, transactions, row locking
+│   ├── SeatType.java          # Enum: REGULAR, PREMIUM, VIP with pricing logic
+│   ├── Bookable.java          # Interface: bookSeats(), cancelBooking()
+│   ├── Show.java              # Entity: seat grid state, seat map rendering
+│   ├── Booking.java           # Record: booking details, discount calculation, summaries
+│   ├── Theatre.java           # Domain service: orchestration and active bookings
+│   └── CineApp.java           # Entry point: console menu loop & fail-fast checks
+├── schema.sql                 # Convenience root copy of database/schema.sql
 └── README.md
 ```
 
 ---
 
-## Class Responsibilities
+## Configuration & Environment Variables
 
-### `SeatType` (enum)
-Defines the three seat categories. Each constant carries its own `price` field and a `getPrice()` getter. The static `fromRow(char)` factory maps a row letter (A–E) to the correct category. **All booking price calculations read from this enum.**
+`DatabaseConfig` reads database credentials from environment variables. If not set, it defaults to standard local development values:
 
-### `Bookable` (interface)
-Declares two operations that any bookable entity must implement:
-- `bookSeats(String[])` — validate and commit seats; returns normalised codes
-- `cancelBooking(Booking)` — free seats associated with a booking
+| Variable | Description | Default Value |
+|---|---|---|
+| `DB_URL` | JDBC Connection URL | `jdbc:mysql://localhost:3306/cinebook?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC` |
+| `DB_USER` | MySQL Username | `root` |
+| `DB_PASSWORD` | MySQL Password | `root` |
 
-### `Show` (implements Bookable)
-Stores the movie name, show time, and a `char[5][8]` seat grid (`'O'` = available, `'X'` = booked). Implements the two-phase all-or-nothing booking algorithm and provides a formatted `displaySeatMap()` rendered with nested loops.
+### Setting Environment Variables (Optional)
 
-### `Booking`
-Auto-generates a unique ID via a static counter (`CB1001`, `CB1002`, …). Stores the show, seat codes, amount charged, coupon applied, and cancellation status. Overloads `calculateTotal()`:
-- `calculateTotal()` — full price, no discount
-- `calculateTotal(String coupon)` — 10% off when coupon is `CINE10`; invalid coupons are silently ignored
+**PowerShell (Windows):**
+```powershell
+$env:DB_URL="jdbc:mysql://localhost:3306/cinebook?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC"
+$env:DB_USER="root"
+$env:DB_PASSWORD="your_mysql_password"
+```
 
-### `Theatre`
-Seeds four shows at start-up. Owns an `ArrayList<Booking>`. `makeBooking()` delegates grid changes to the `Show` and then creates exactly one `Booking` (so failed attempts never waste an ID). `cancelBooking()` enforces the one-cancel rule and delegates seat-freeing to the `Show`.
-
-### `CineApp`
-Contains `main()`, the main-menu loop, and all console I/O. A `readInt()` helper catches `InputMismatchException` so non-numeric input never crashes the app.
+**Bash (Linux / macOS):**
+```bash
+export DB_URL="jdbc:mysql://localhost:3306/cinebook?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC"
+export DB_USER="root"
+export DB_PASSWORD="your_mysql_password"
+```
 
 ---
 
-## All-or-Nothing Booking — How It Works
+## Setup & Initialization
 
-`Show.bookSeats()` executes in two strict phases:
+### 1. Requirements
+- **JDK 8 or later**
+- **MySQL Server 8.0 or later** running locally or remotely
 
+### 2. Initialize Database & Seed Data
+Run `database/schema.sql` using the MySQL command-line client:
+
+```powershell
+# From the CineBook root directory:
+mysql -u root -p < database/schema.sql
 ```
-Phase 1 – Validate (read-only, no grid changes)
-  ├─ Parse each seat code (must be exactly 2 chars, row A-E, col 1-8)
-  └─ Check each seat is 'O' (available)
-  → If ANY check fails, throw with a full error list.
+*(Or in PowerShell: `Get-Content database\schema.sql | mysql -u root -p`)*
 
-Phase 2 – Commit (only if Phase 1 had zero errors)
-  └─ Mark every seat 'X'
-  → Return normalised codes; Theatre creates one Booking.
-```
+This script:
+1. Creates the `cinebook` database if it doesn't exist.
+2. Creates all tables and foreign key constraints.
+3. Seeds the 4 initial shows (`Inception`, `Interstellar`, `The Dark Knight`, `Oppenheimer`).
+4. Seeds 40 seats (Rows A–E, Columns 1–8) for each show.
 
-**Example:** entering `C3,Z9` — `C3` is valid but `Z9` has an invalid row. Phase 1 catches `Z9` and throws before a single seat is marked. The grid is left unchanged and the user sees a precise error.
-
----
-
-## Sample Interaction
-
-```
-*** BOOKING — C3,C4 with coupon CINE10 ***
-
-  Booking ID   : CB1001
-  Movie        : Inception
-  Show Time    : 10:30 AM
-  Seats        : C3, C4
-  Coupon       : CINE10 (10% discount applied)
-  Amount Paid  : Rs. 450       ← 2×250=500, −10%=450
-
-*** INVALID SEAT — Z9 ***
-
-  [!] Booking failed. Please fix the following issues:
-    - Row 'Z' is invalid. Valid rows are A to E.
-  Seat map is unchanged. No seats were booked.
-
-*** CANCELLATION — CB1001 ***
-
-  Booking ID   : CB1001
-  Seats freed  : C3, C4
-  Amount Paid  : Rs. 450
-  Refund (80%) : Rs. 360       ← 450 × 0.80 = 360
-
-*** DUPLICATE CANCEL — CB1001 ***
-
-  [!] Booking CB1001 has already been cancelled.
-```
+*(Note: The Java application also includes an idempotent initialization check in `TheatreDao.ensureSeeded()` to ensure missing records are automatically seeded if needed).*
 
 ---
 
 ## How to Compile and Run
 
-**Requirements:** JDK 8 or later
+### Windows (PowerShell)
 
 ```powershell
-# Compile (from the CineBook root)
-javac -d out src\SeatType.java src\Bookable.java src\Booking.java src\Show.java src\Theatre.java src\CineApp.java
+# 1. Compile all Java source files into out/:
+javac -cp "lib/mysql-connector-j-8.3.0.jar;." -d out (Get-ChildItem -Path src -Filter *.java | ForEach-Object { $_.FullName })
 
-# Run
-java -cp out CineApp
+# 2. Run the application:
+java -cp "out;lib/mysql-connector-j-8.3.0.jar" CineApp
+```
+
+### Linux / macOS (Bash)
+
+```bash
+# 1. Compile:
+javac -cp "lib/mysql-connector-j-8.3.0.jar:." -d out src/*.java
+
+# 2. Run:
+java -cp "out:lib/mysql-connector-j-8.3.0.jar" CineApp
 ```
 
 ---
 
-## OOP Concepts Demonstrated
+## Concurrency & Transaction Safety
 
-| Concept | Where used |
+1. **Two-Phase Commit in MySQL**:
+   - Validation and seat code syntax checks run first.
+   - Requested seats are sorted alphabetically and locked using `SELECT ... FOR UPDATE`. This eliminates deadlocks and ensures that concurrent booking attempts on overlapping seats queue safely.
+   - If any seat is already booked or non-existent, the transaction rolls back (`conn.rollback()`) and throws a descriptive error.
+   - If all seats are available, the booking and seats are inserted and updated within the same transaction before `conn.commit()`.
+2. **Cancellation Protection**:
+   - `cancelBooking` locks the booking row with `SELECT ... FOR UPDATE`.
+   - Prevents duplicate cancellations and race conditions during refund processing.
+   - Resets the seats back to `is_booked = FALSE` and `booking_id = NULL`.
+
+---
+
+## Sample Interactions
+
+### 1. Booking Confirmation (C3, C4 with CINE10)
+```text
+==================================================
+         BOOKING CONFIRMATION
+==================================================
+  Booking ID   : CB1001
+  Movie        : Inception
+  Show Time    : 10:30 AM
+  Seats        : C3, C4
+  Coupon       : CINE10 (10% discount applied)
+  Amount Paid  : Rs. 450
+==================================================
+  Thank you for booking with CineBook!
+==================================================
+```
+
+### 2. Already Booked Conflict
+```text
+  Enter seat codes (comma-separated, e.g. A1,B3,C5):
+  Seats: C4, C5
+  Enter coupon code (or press Enter to skip): 
+
+  [!] Booking failed. Please fix the following issues:
+  - Seat C4 is already booked.
+
+  Seat map is unchanged. No seats were booked.
+```
+
+### 3. Cancellation Receipt (80% Refund)
+```text
+==================================================
+         CANCELLATION RECEIPT
+==================================================
+  Booking ID   : CB1001
+  Movie        : Inception
+  Show Time    : 10:30 AM
+  Seats freed  : C3, C4
+  Amount Paid  : Rs. 450
+  Refund (80%) : Rs. 360
+==================================================
+```
+
+### 4. Database Unavailable Error (Fail-Fast)
+```text
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  [!] FATAL DATABASE ERROR: Unable to connect to MySQL.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  Target URL : jdbc:mysql://localhost:3306/cinebook...
+  User       : root
+  Reason     : Communications link failure
+  ...
+```
+
+---
+
+## OOP & Architectural Concepts Demonstrated
+
+| Concept | Implementation Details |
 |---|---|
-| Enum with fields & methods | `SeatType` |
-| Interface | `Bookable` |
-| Inheritance / polymorphism | `Show implements Bookable` |
-| Method overloading | `Booking.calculateTotal()` |
-| 2D array | `char[5][8]` seat grid in `Show` |
-| Static counter | Booking ID generation in `Booking` |
-| ArrayList | Booking storage in `Theatre` |
-| Exception handling | `CineApp.readInt()`, validation in `Show` |
-| Nested loops | Seat-map rendering in `Show.displaySeatMap()` |
-| Formatted output | `printf` throughout |
+| **DAO Pattern** | `TheatreDao` encapsulates all JDBC queries and transactions. |
+| **Separation of Concerns** | `CineApp` handles UI I/O; `Theatre` manages domain coordination; `TheatreDao` handles persistence. |
+| **ACID Transactions** | Multi-table atomic commits and rollbacks (`conn.setAutoCommit(false)`). |
+| **Row-Level Locking** | `SELECT ... FOR UPDATE` prevents concurrent seat race conditions. |
+| **Enum Encapsulation** | `SeatType` contains all pricing rules and row mappings. |
+| **Interface Polymorphism** | `Show implements Bookable`. |
+| **Method Overloading** | Overloaded total calculation in `Booking`. |
+| **Exception Handling** | Custom and checked exceptions translated to clear user console messages. |
 
 ---
 

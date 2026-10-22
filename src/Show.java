@@ -9,7 +9,7 @@
  *   'O' – seat is available
  *   'X' – seat is booked
  *
- * Implements Bookable; all booking and cancellation logic lives here.
+ * Implements Bookable; maintains seat grid state and displays seat map.
  */
 public class Show implements Bookable {
 
@@ -19,12 +19,13 @@ public class Show implements Bookable {
     public static final int ROWS    = 5;   // A to E
     public static final int COLUMNS = 8;   // 1 to 8
 
-    private static final char AVAILABLE = 'O';
-    private static final char BOOKED    = 'X';
+    public static final char AVAILABLE = 'O';
+    public static final char BOOKED    = 'X';
 
     // ------------------------------------------------------------------ //
     // Fields
     // ------------------------------------------------------------------ //
+    private final int    showId;
     private final String movieName;
     private final String showTime;
 
@@ -32,9 +33,10 @@ public class Show implements Bookable {
     private final char[][] seats;
 
     // ------------------------------------------------------------------ //
-    // Constructor
+    // Constructors
     // ------------------------------------------------------------------ //
-    public Show(String movieName, String showTime) {
+    public Show(int showId, String movieName, String showTime) {
+        this.showId    = showId;
         this.movieName = movieName;
         this.showTime  = showTime;
         this.seats     = new char[ROWS][COLUMNS];
@@ -47,11 +49,31 @@ public class Show implements Bookable {
         }
     }
 
+    public Show(String movieName, String showTime) {
+        this(0, movieName, showTime);
+    }
+
     // ------------------------------------------------------------------ //
-    // Getters
+    // Getters & Setters
     // ------------------------------------------------------------------ //
+    public int    getShowId()    { return showId;    }
     public String getMovieName() { return movieName; }
     public String getShowTime()  { return showTime;  }
+
+    /**
+     * Updates the status of an individual seat.
+     *
+     * @param rowChar uppercase row letter ('A'-'E')
+     * @param colNum  1-based column number (1-8)
+     * @param booked  true if booked ('X'), false if available ('O')
+     */
+    public void setSeatStatus(char rowChar, int colNum, boolean booked) {
+        int r = Character.toUpperCase(rowChar) - 'A';
+        int c = colNum - 1;
+        if (r >= 0 && r < ROWS && c >= 0 && c < COLUMNS) {
+            seats[r][c] = booked ? BOOKED : AVAILABLE;
+        }
+    }
 
     // ------------------------------------------------------------------ //
     // Seat-map display
@@ -59,16 +81,6 @@ public class Show implements Bookable {
 
     /**
      * Prints the current seat map to standard output.
-     * Example output:
-     *   =============================================
-     *           SEAT MAP – Inception (10:30 AM)
-     *   =============================================
-     *        1   2   3   4   5   6   7   8
-     *   A  [ O ] [ O ] [ O ] ...
-     *   ...
-     *   =============================================
-     *   Legend:  O = Available   X = Booked
-     *   Pricing: REGULAR(A-B)=Rs.150  PREMIUM(C-D)=Rs.250  VIP(E)=Rs.400
      */
     public void displaySeatMap() {
         System.out.println("=".repeat(57));
@@ -110,9 +122,12 @@ public class Show implements Bookable {
      * @return int[] {rowIndex, colIndex}  (0-based)
      * @throws IllegalArgumentException if the code format is invalid
      */
-    private int[] parseCode(String code) {
+    public static int[] parseCode(String code) {
+        if (code == null) {
+            throw new IllegalArgumentException("Seat code cannot be null.");
+        }
         code = code.trim().toUpperCase();
-        if (code.length() < 2 || code.length() > 2) {
+        if (code.length() != 2) {
             throw new IllegalArgumentException(
                     "'" + code + "' is not a valid seat code. Use format like A1, E8.");
         }
@@ -138,7 +153,7 @@ public class Show implements Bookable {
      * @param colIdx 0-based column index
      * @return true if the seat is available
      */
-    private boolean isAvailable(int rowIdx, int colIdx) {
+    public boolean isAvailable(int rowIdx, int colIdx) {
         return seats[rowIdx][colIdx] == AVAILABLE;
     }
 
@@ -147,23 +162,14 @@ public class Show implements Bookable {
     // ------------------------------------------------------------------ //
 
     /**
-     * All-or-nothing seat booking.
+     * All-or-nothing in-memory seat booking.
      *
      * Phase 1 - Validate: parse every code and confirm each seat is
      *            available; collect errors without touching the grid.
-     * Phase 2 - Commit: only if Phase 1 produced zero errors, mark every
-     *            seat as booked and return the normalised seat codes.
-     * The caller (Theatre.makeBooking) is responsible for creating the
-     * single Booking object so only one ID is ever consumed per transaction.
-     *
-     * @param seatCodes array of seat code strings entered by the user
-     * @return normalised (uppercase, trimmed) seat codes that were reserved
-     * @throws IllegalArgumentException (with a descriptive message) if any
-     *         code is invalid or any seat is already booked
+     * Phase 2 - Commit: mark seats as booked and return normalised codes.
      */
     @Override
     public String[] bookSeats(String[] seatCodes) {
-        // ---- Phase 1: Validate ----------------------------------------
         int[][] indices = new int[seatCodes.length][2];
         StringBuilder errors = new StringBuilder();
 
@@ -186,21 +192,17 @@ public class Show implements Bookable {
                     "Booking failed. Please fix the following issues:\n" + errors);
         }
 
-        // ---- Phase 2: Commit ------------------------------------------
         String[] normCodes = new String[seatCodes.length];
         for (int i = 0; i < seatCodes.length; i++) {
             seats[indices[i][0]][indices[i][1]] = BOOKED;
             normCodes[i] = seatCodes[i].trim().toUpperCase();
         }
 
-        return normCodes;   // caller builds the Booking
+        return normCodes;
     }
 
     /**
      * Frees the seats associated with a booking (sets them back to 'O').
-     * Called after a cancellation has been validated by Theatre.
-     *
-     * @param booking the booking whose seats should be freed
      */
     @Override
     public void cancelBooking(Booking booking) {

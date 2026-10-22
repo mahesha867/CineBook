@@ -1,35 +1,22 @@
 /**
  * Booking.java
  *
- * Immutable-ish record of a confirmed seat reservation.
+ * Record of a confirmed seat reservation.
  *
  * Key responsibilities:
- *   - Auto-generate a unique booking ID using a static counter.
- *   - Store the show, reserved seat codes, amount charged, and
- *     whether the booking has been cancelled.
- *   - Expose calculateTotal() (no coupon) and an overloaded
- *     calculateTotal(String coupon) that applies a 10% discount
- *     for the code "CINE10".
- *
- * The amount field is set at construction time via calculateTotal()
- * so that cancellation refunds can always be derived from it later.
- *
- * NOTE: Booking objects are only created by Theatre.makeBooking() after
- * the Show has successfully validated and committed the seat changes.
- * This avoids wasting booking IDs on failed attempts.
+ *   - Store booking ID (e.g. "CB1001"), associated show, reserved seat codes,
+ *     amount charged, coupon applied, and cancellation status.
+ *   - Provide calculateTotal() and overloaded calculateTotal(String coupon)
+ *     that applies 10% discount for "CINE10".
+ *   - Display booking confirmation and cancellation summaries.
  */
 public class Booking {
 
     // ------------------------------------------------------------------ //
-    // Valid coupon
+    // Valid coupon constants
     // ------------------------------------------------------------------ //
-    private static final String VALID_COUPON   = "CINE10";
-    private static final double COUPON_DISCOUNT = 0.10;   // 10 %
-
-    // ------------------------------------------------------------------ //
-    // Static counter for ID generation
-    // ------------------------------------------------------------------ //
-    private static int counter = 1000;
+    public static final String VALID_COUPON    = "CINE10";
+    public static final double COUPON_DISCOUNT = 0.10;   // 10 %
 
     // ------------------------------------------------------------------ //
     // Fields
@@ -42,34 +29,45 @@ public class Booking {
     private       boolean   cancelled;
 
     // ------------------------------------------------------------------ //
-    // Constructors (overloading for coupon support)
+    // Constructors
     // ------------------------------------------------------------------ //
 
     /**
-     * Creates a booking without a coupon code.
-     * Amount is computed via calculateTotal().
+     * Primary constructor used by DAO / repository when creating or loading bookings from the database.
+     *
+     * @param bookingId     database-generated booking ID (e.g., "CB1001")
+     * @param show          the booked Show
+     * @param seatCodes     array of seat codes
+     * @param amountCharged the calculated amount paid
+     * @param couponUsed    coupon code if applied, otherwise empty string
+     * @param cancelled     true if booking was cancelled
+     */
+    public Booking(String bookingId, Show show, String[] seatCodes, double amountCharged, String couponUsed, boolean cancelled) {
+        this.bookingId     = bookingId;
+        this.show          = show;
+        this.seatCodes     = seatCodes;
+        this.amountCharged = amountCharged;
+        this.couponUsed    = (couponUsed != null && isCouponValid(couponUsed)) ? couponUsed.toUpperCase() : (couponUsed == null ? "" : couponUsed.trim());
+        this.cancelled     = cancelled;
+    }
+
+    /**
+     * Convenience constructor without a coupon code.
      */
     public Booking(Show show, String[] seatCodes) {
         this(show, seatCodes, "");
     }
 
     /**
-     * Creates a booking with an optional coupon code.
-     * Amount is computed via calculateTotal(couponCode).
-     *
-     * @param couponCode the coupon string entered by the user (may be empty or invalid)
+     * Convenience constructor with an optional coupon code.
      */
     public Booking(Show show, String[] seatCodes, String couponCode) {
-        this.bookingId     = "CB" + (++counter);
         this.show          = show;
         this.seatCodes     = seatCodes;
         this.cancelled     = false;
-
-        double total = calculateTotal(couponCode);
-        this.amountCharged = total;
-
-        // Store the coupon only if it was actually valid/applied
-        this.couponUsed = isCouponValid(couponCode) ? couponCode.toUpperCase() : "";
+        this.amountCharged = calculateTotal(couponCode);
+        this.couponUsed    = isCouponValid(couponCode) ? couponCode.toUpperCase() : "";
+        this.bookingId     = "CB_TEMP";
     }
 
     // ------------------------------------------------------------------ //
@@ -83,34 +81,47 @@ public class Booking {
      * @return total amount in rupees
      */
     public double calculateTotal() {
-        double total = 0;
-        for (String code : seatCodes) {
-            char row = code.charAt(0);
-            total += SeatType.fromRow(row).getPrice();
-        }
-        return total;
+        return computeTotal(this.seatCodes, "");
     }
 
     /**
      * Overloaded version: calculates total, applying a 10% discount if
      * the supplied coupon matches "CINE10" (case-insensitive).
-     * An unrecognised coupon is silently ignored (no crash, no discount).
      *
      * @param couponCode the coupon string; may be null, empty, or invalid
      * @return discounted (or full) amount in rupees
      */
     public double calculateTotal(String couponCode) {
-        double base = calculateTotal();
-        if (isCouponValid(couponCode)) {
-            return base * (1.0 - COUPON_DISCOUNT);
+        return computeTotal(this.seatCodes, couponCode);
+    }
+
+    /**
+     * Static helper to compute total given seat codes and an optional coupon code.
+     *
+     * @param seatCodes  array of seat codes (e.g., {"C3", "C4"})
+     * @param couponCode coupon code (e.g. "CINE10")
+     * @return total amount in rupees
+     */
+    public static double computeTotal(String[] seatCodes, String couponCode) {
+        double total = 0;
+        if (seatCodes != null) {
+            for (String code : seatCodes) {
+                if (code != null && !code.trim().isEmpty()) {
+                    char row = code.trim().toUpperCase().charAt(0);
+                    total += SeatType.fromRow(row).getPrice();
+                }
+            }
         }
-        return base;
+        if (isCouponValid(couponCode)) {
+            return total * (1.0 - COUPON_DISCOUNT);
+        }
+        return total;
     }
 
     // ------------------------------------------------------------------ //
     // Coupon validation helper
     // ------------------------------------------------------------------ //
-    private boolean isCouponValid(String code) {
+    public static boolean isCouponValid(String code) {
         return code != null && code.trim().equalsIgnoreCase(VALID_COUPON);
     }
 

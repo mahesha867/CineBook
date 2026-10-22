@@ -1,3 +1,4 @@
+import java.sql.SQLException;
 import java.util.InputMismatchException;
 import java.util.List;
 import java.util.Scanner;
@@ -8,21 +9,46 @@ import java.util.Scanner;
  * Entry point and console UI for the CineBook application.
  *
  * Responsibilities:
+ *   - Validate database connectivity on launch; fail fast with clear diagnostics.
  *   - Drive the main menu loop.
- *   - Read and validate all user input.
+ *   - Read and validate console user input.
  *   - Coordinate Theatre, Show, and Booking interactions.
- *   - Handle exceptions gracefully – never crash on bad input.
+ *   - Handle exceptions gracefully – never crash on bad user input.
  */
 public class CineApp {
 
     // ------------------------------------------------------------------ //
-    private static final Scanner  scanner = new Scanner(System.in);
-    private static final Theatre  theatre = new Theatre("CineBook Cinemas");
+    private static final Scanner scanner = new Scanner(System.in);
+    private static Theatre theatre;
 
     // ------------------------------------------------------------------ //
     // Entry point
     // ------------------------------------------------------------------ //
     public static void main(String[] args) {
+        // Step 1: Validate Database Connection before starting UI
+        try {
+            DatabaseConfig.validateConnection();
+            theatre = new Theatre("CineBook Cinemas");
+        } catch (SQLException ex) {
+            System.err.println("\n" + "!".repeat(60));
+            System.err.println("  [!] FATAL DATABASE ERROR: Unable to connect to MySQL.");
+            System.err.println("!".repeat(60));
+            System.err.printf("  Target URL : %s%n", DatabaseConfig.getUrl());
+            System.err.printf("  User       : %s%n", DatabaseConfig.getUser());
+            System.err.printf("  Reason     : %s%n%n", ex.getMessage());
+            System.err.println("  Troubleshooting:");
+            System.err.println("    1. Ensure your MySQL server service is active.");
+            System.err.println("    2. Ensure the 'cinebook' database and schema exist:");
+            System.err.println("         mysql -u root -p < database/schema.sql");
+            System.err.println("    3. If necessary, set environment variables:");
+            System.err.println("         $env:DB_URL      = \"jdbc:mysql://localhost:3306/cinebook...\"");
+            System.err.println("         $env:DB_USER     = \"root\"");
+            System.err.println("         $env:DB_PASSWORD = \"yourpassword\"");
+            System.err.println("!".repeat(60) + "\n");
+            System.exit(1);
+            return;
+        }
+
         printBanner();
         boolean running = true;
 
@@ -116,7 +142,6 @@ public class CineApp {
         }
 
         String[] seatCodes = seatInput.split(",");
-        // Trim each code
         for (int i = 0; i < seatCodes.length; i++) {
             seatCodes[i] = seatCodes[i].trim();
         }
@@ -125,13 +150,15 @@ public class CineApp {
         System.out.print("  Enter coupon code (or press Enter to skip): ");
         String coupon = scanner.nextLine().trim();
 
-        // Step 5 – Attempt booking (all-or-nothing)
+        // Step 5 – Attempt booking (all-or-nothing database transaction)
         try {
             Booking booking = theatre.makeBooking(selectedShow, seatCodes, coupon);
             booking.printSummary();
         } catch (IllegalArgumentException ex) {
             System.out.println("\n  [!] " + ex.getMessage());
             System.out.println("  Seat map is unchanged. No seats were booked.\n");
+        } catch (IllegalStateException ex) {
+            System.out.println("\n  [!] Database operation failed: " + ex.getMessage() + "\n");
         }
     }
 
@@ -154,6 +181,8 @@ public class CineApp {
             cancelled.printCancellationSummary();
         } catch (IllegalArgumentException ex) {
             System.out.println("\n  [!] " + ex.getMessage() + "\n");
+        } catch (IllegalStateException ex) {
+            System.out.println("\n  [!] Database operation failed: " + ex.getMessage() + "\n");
         }
     }
 
@@ -163,8 +192,7 @@ public class CineApp {
 
     /**
      * Reads a single integer from the console.
-     * If the user enters something that is not an integer, returns -1
-     * so the caller's switch/if can route it to an error message.
+     * If the user enters something that is not an integer, returns -1.
      *
      * @param prompt the text to display before waiting for input
      * @return the integer entered, or -1 on invalid input
@@ -176,7 +204,7 @@ public class CineApp {
             scanner.nextLine();  // consume trailing newline
             return value;
         } catch (InputMismatchException e) {
-            scanner.nextLine();  // clear the bad token
+            scanner.nextLine();  // clear bad token
             return -1;
         }
     }
