@@ -1,4 +1,5 @@
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.InputMismatchException;
 import java.util.List;
 import java.util.Scanner;
@@ -12,7 +13,7 @@ import java.util.Scanner;
  *   - Validate database connectivity on launch; fail fast with clear diagnostics.
  *   - Drive the main menu loop.
  *   - Read and validate console user input.
- *   - Coordinate Theatre, Show, and Booking interactions.
+ *   - Coordinate Theatre, Show, Booking, and Movie Snacks interactions.
  *   - Handle exceptions gracefully – never crash on bad user input.
  */
 public class CineApp {
@@ -146,13 +147,26 @@ public class CineApp {
             seatCodes[i] = seatCodes[i].trim();
         }
 
-        // Step 4 – Optional coupon
-        System.out.print("  Enter coupon code (or press Enter to skip): ");
+        // Calculate and preview ticket subtotal
+        double ticketSubtotal = Booking.computeTicketSubtotal(seatCodes);
+        System.out.printf("%n  Ticket Subtotal: Rs. %.0f%n%n", ticketSubtotal);
+
+        // Step 6 & 7 – Optional movie snacks ordering
+        List<SnackOrder> snackOrders = new ArrayList<>();
+        System.out.print("  Would you like to order snacks? (Y/N): ");
+        String snackChoice = scanner.nextLine().trim();
+
+        if (snackChoice.equalsIgnoreCase("Y")) {
+            handleSnackOrdering(snackOrders);
+        }
+
+        // Step 8 – Optional coupon
+        System.out.printf("%n  Enter coupon code (or press Enter to skip): ");
         String coupon = scanner.nextLine().trim();
 
-        // Step 5 – Attempt booking (all-or-nothing database transaction)
+        // Step 9, 10, 11 – Attempt booking (all-or-nothing database transaction)
         try {
-            Booking booking = theatre.makeBooking(selectedShow, seatCodes, coupon);
+            Booking booking = theatre.makeBooking(selectedShow, seatCodes, coupon, snackOrders);
             booking.printSummary();
         } catch (IllegalArgumentException ex) {
             System.out.println("\n  [!] " + ex.getMessage());
@@ -160,6 +174,162 @@ public class CineApp {
         } catch (IllegalStateException ex) {
             System.out.println("\n  [!] Database operation failed: " + ex.getMessage() + "\n");
         }
+    }
+
+    // ------------------------------------------------------------------ //
+    // Snack Ordering flow
+    // ------------------------------------------------------------------ //
+    private static void handleSnackOrdering(List<SnackOrder> snackCart) {
+        List<Snack> availableSnacks;
+        try {
+            availableSnacks = theatre.getAvailableSnacks();
+        } catch (SQLException ex) {
+            System.out.println("\n  [!] Unable to load snack menu from database: " + ex.getMessage());
+            System.out.println("  Continuing with ticket-only booking.\n");
+            return;
+        }
+
+        if (availableSnacks.isEmpty()) {
+            System.out.println("\n  [!] No snacks are currently available.\n");
+            return;
+        }
+
+        displaySnackMenu(availableSnacks);
+        SnackService snackService = theatre.getSnackService();
+
+        boolean adding = true;
+        while (adding) {
+            System.out.print("  Enter snack ID: ");
+            String snackId = scanner.nextLine().trim().toUpperCase();
+
+            Snack selectedSnack = findSnack(availableSnacks, snackId);
+            if (selectedSnack == null) {
+                System.out.printf("  [!] Invalid snack ID '%s'. Please select a valid ID from the menu.%n%n", snackId);
+                continue;
+            }
+
+            int qty = readPositiveInt("  Enter quantity: ");
+            snackService.addOrUpdateSnack(snackCart, selectedSnack, qty);
+            System.out.println("\n  Snack added successfully!\n");
+
+            System.out.print("  Would you like to add another snack? (Y/N): ");
+            String more = scanner.nextLine().trim();
+            if (!more.equalsIgnoreCase("Y")) {
+                adding = false;
+            }
+        }
+
+        // Review, modify, or remove items option
+        if (!snackCart.isEmpty()) {
+            manageSnackCart(snackCart, availableSnacks, snackService);
+        }
+    }
+
+    private static void displaySnackMenu(List<Snack> snacks) {
+        System.out.println("\n" + "=".repeat(50));
+        System.out.println("               CINEBOOK SNACK MENU");
+        System.out.println("=".repeat(50));
+        System.out.printf("%-7s %-25s %s%n", "ID", "SNACK NAME", "PRICE");
+        System.out.println("-".repeat(50));
+        for (Snack s : snacks) {
+            System.out.printf("%-7s %-25s Rs. %.0f%n", s.getSnackId(), s.getSnackName(), s.getPrice());
+        }
+        System.out.println("=".repeat(50) + "\n");
+    }
+
+    private static Snack findSnack(List<Snack> snacks, String snackId) {
+        if (snackId == null) return null;
+        for (Snack s : snacks) {
+            if (s.getSnackId().equalsIgnoreCase(snackId.trim())) {
+                return s;
+            }
+        }
+        return null;
+    }
+
+    private static void manageSnackCart(List<SnackOrder> cart, List<Snack> availableSnacks, SnackService snackService) {
+        System.out.print("\n  Would you like to review, modify, or remove any snacks? (Y/N): ");
+        String answer = scanner.nextLine().trim();
+        if (!answer.equalsIgnoreCase("Y")) {
+            return;
+        }
+
+        boolean managing = true;
+        while (managing && !cart.isEmpty()) {
+            System.out.println("\n" + "-".repeat(40));
+            System.out.println("        SNACK ORDER MANAGEMENT");
+            System.out.println("-".repeat(40));
+            System.out.println("  [1] Review Selected Snacks");
+            System.out.println("  [2] Modify Snack Quantity");
+            System.out.println("  [3] Remove a Snack");
+            System.out.println("  [4] Add Another Snack");
+            System.out.println("  [5] Done with Snacks");
+            System.out.println("-".repeat(40));
+
+            int choice = readInt("  Enter your choice (1-5): ");
+            switch (choice) {
+                case 1:
+                    printCartSummary(cart, snackService);
+                    break;
+                case 2:
+                    printCartSummary(cart, snackService);
+                    System.out.print("  Enter snack ID to modify: ");
+                    String modId = scanner.nextLine().trim().toUpperCase();
+                    SnackOrder existing = snackService.findInCart(cart, modId);
+                    if (existing == null) {
+                        System.out.println("  [!] That snack is not currently in your cart.");
+                    } else {
+                        int newQty = readPositiveInt("  Enter new quantity: ");
+                        snackService.modifyQuantity(cart, modId, newQty);
+                        System.out.println("  [✓] Quantity updated successfully!");
+                    }
+                    break;
+                case 3:
+                    printCartSummary(cart, snackService);
+                    System.out.print("  Enter snack ID to remove: ");
+                    String remId = scanner.nextLine().trim().toUpperCase();
+                    if (snackService.removeSnack(cart, remId)) {
+                        System.out.println("  [✓] Snack removed from cart.");
+                    } else {
+                        System.out.println("  [!] That snack is not currently in your cart.");
+                    }
+                    break;
+                case 4:
+                    displaySnackMenu(availableSnacks);
+                    System.out.print("  Enter snack ID: ");
+                    String addId = scanner.nextLine().trim().toUpperCase();
+                    Snack snack = findSnack(availableSnacks, addId);
+                    if (snack == null) {
+                        System.out.println("  [!] Invalid snack ID.");
+                    } else {
+                        int addQty = readPositiveInt("  Enter quantity: ");
+                        snackService.addOrUpdateSnack(cart, snack, addQty);
+                        System.out.println("  [✓] Snack added to cart!");
+                    }
+                    break;
+                case 5:
+                    managing = false;
+                    break;
+                default:
+                    System.out.println("  [!] Invalid choice. Please choose 1 to 5.");
+            }
+        }
+
+        if (cart.isEmpty()) {
+            System.out.println("\n  All snacks were removed. Continuing with ticket-only booking.");
+        }
+    }
+
+    private static void printCartSummary(List<SnackOrder> cart, SnackService snackService) {
+        System.out.println("\n  Current Snack Cart:");
+        if (cart.isEmpty()) {
+            System.out.println("    (Cart is empty)");
+            return;
+        }
+        for (SnackOrder order : cart) {
+            System.out.printf("    - %s%n", order.getFormattedSummary());
+        }
+        System.out.printf("  Snack Subtotal: Rs. %.0f%n", snackService.calculateSnackSubtotal(cart));
     }
 
     // ------------------------------------------------------------------ //
@@ -193,9 +363,6 @@ public class CineApp {
     /**
      * Reads a single integer from the console.
      * If the user enters something that is not an integer, returns -1.
-     *
-     * @param prompt the text to display before waiting for input
-     * @return the integer entered, or -1 on invalid input
      */
     private static int readInt(String prompt) {
         System.out.print(prompt);
@@ -206,6 +373,25 @@ public class CineApp {
         } catch (InputMismatchException e) {
             scanner.nextLine();  // clear bad token
             return -1;
+        }
+    }
+
+    /**
+     * Reads a strictly positive integer from the console with retry on bad input.
+     */
+    private static int readPositiveInt(String prompt) {
+        while (true) {
+            System.out.print(prompt);
+            String input = scanner.nextLine().trim();
+            try {
+                int value = Integer.parseInt(input);
+                if (value > 0) {
+                    return value;
+                }
+                System.out.println("  [!] Quantity must be greater than 0. Please try again.");
+            } catch (NumberFormatException e) {
+                System.out.println("  [!] Invalid number. Please enter a positive integer.");
+            }
         }
     }
 }

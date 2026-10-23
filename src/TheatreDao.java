@@ -5,6 +5,7 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -20,10 +21,11 @@ import java.util.Set;
  * strictly decoupled from console UI and domain presentation logic.
  *
  * Implements:
- *   - Idempotent schema seeding
- *   - Live loading of shows, seats, and bookings
+ *   - Idempotent schema seeding for shows, seats, and snacks
+ *   - Live loading of shows, seats, bookings, and snack orders
  *   - Concurrency-safe, transactional bookings with SELECT ... FOR UPDATE
- *   - Transactional cancellations with 80% refund calculation
+ *   - Atomic persistence of ticket reservations and snack orders
+ *   - Transactional cancellations with 80% refund calculation and preserved snack history
  *   - Safe resource cleanup using try-with-resources
  */
 public class TheatreDao {
@@ -38,9 +40,23 @@ public class TheatreDao {
             {"Oppenheimer",     "09:30 PM"}
     };
 
+    private final SnackDao snackDao;
+
+    public TheatreDao(SnackDao snackDao) {
+        this.snackDao = snackDao != null ? snackDao : new SnackDao();
+    }
+
+    public TheatreDao() {
+        this(new SnackDao());
+    }
+
+    public SnackDao getSnackDao() {
+        return snackDao;
+    }
+
     /**
-     * Ensures initial shows and their 40 seats each are seeded idempotently.
-     * If shows or seats are missing, inserts them without duplicating existing rows.
+     * Ensures initial shows, their 40 seats each, and snacks are seeded idempotently.
+     * If shows, seats, or snacks are missing, inserts them without duplicating existing rows.
      */
     public void ensureSeeded() throws SQLException {
         try (Connection conn = DatabaseConfig.getConnection()) {
@@ -92,6 +108,9 @@ public class TheatreDao {
                 conn.setAutoCommit(true);
             }
         }
+
+        // Idempotently seed snack menu
+        snackDao.ensureSeeded();
     }
 
     // ------------------------------------------------------------------ //
@@ -146,7 +165,8 @@ public class TheatreDao {
     // ------------------------------------------------------------------ //
 
     /**
-     * Loads all bookings from MySQL and maps them to their respective Show entities.
+     * Loads all bookings from MySQL and maps them to their respective Show entities
+     * and preserved snack orders.
      *
      * @param shows the list of currently loaded shows
      * @return list of Booking objects
@@ -178,15 +198,18 @@ public class TheatreDao {
                     show = new Show(showId, "Unknown Movie", "Unknown Time");
                 }
 
-                // Load reserved seats for this booking
+                // Load reserved seats and snacks for this booking
                 List<String> seatCodes = getSeatsForBooking(conn, bookingId);
+                List<SnackOrder> snackOrders = snackDao.getSnacksForBooking(conn, bookingId);
+
                 bookings.add(new Booking(
                         bookingId,
                         show,
                         seatCodes.toArray(new String[0]),
                         amountPaid,
                         coupon != null ? coupon : "",
-                        isCancelled
+                        isCancelled,
+                        snackOrders
                 ));
             }
         }
@@ -213,29 +236,49 @@ public class TheatreDao {
     // ------------------------------------------------------------------ //
 
     /**
-     * Makes a booking inside an ACID database transaction.
+     * Overloaded convenience method for bookings without snacks.
+     */
+    public Booking makeBooking(Show show, String[] seatCodes, String couponCode) {
+        return makeBooking(show, seatCodes, couponCode, Collections.emptyList());
+    }
+
+    /**
+     * Makes a ticket and snack booking inside a single ACID database transaction.
      *
-     * 1. Validates input seat codes (syntax and duplicates).
-     * 2. Locks the requested seats using SELECT ... FOR UPDATE (ordered to prevent deadlocks).
+     * 1. Validates input seat codes (syntax and duplicates) and snack orders.
+     * 2. Locks requested seats using SELECT ... FOR UPDATE (ordered to prevent deadlocks).
      * 3. Verifies none of the seats are already booked.
-     * 4. Calculates total price (reading prices from SeatType enum).
+     * 4. Calculates total price (seats + snacks - coupon discount on tickets only).
      * 5. Generates collision-safe ID from booking_seq.
-     * 6. Inserts into bookings and booking_seats.
+     * 6. Inserts into bookings, booking_seats, and booking_snacks.
      * 7. Updates seats to is_booked = TRUE and sets booking_id.
      * 8. Commits transaction or rolls back on any error.
      *
-     * @param show       the chosen Show
-     * @param seatCodes  seat code array (e.g. {"C3", "C4"})
-     * @param couponCode optional coupon code
+     * @param show        the chosen Show
+     * @param seatCodes   seat code array (e.g. {"C3", "C4"})
+     * @param couponCode  optional coupon code
+     * @param snackOrders optional list of snack orders
      * @return confirmed Booking entity
-     * @throws IllegalArgumentException on validation, already-booked, or conflict errors
+     * @throws IllegalArgumentException on validation, conflict, or parameter errors
      */
-    public Booking makeBooking(Show show, String[] seatCodes, String couponCode) {
+    public Booking makeBooking(Show show, String[] seatCodes, String couponCode, List<SnackOrder> snackOrders) {
         if (seatCodes == null || seatCodes.length == 0) {
             throw new IllegalArgumentException("No seat codes provided.");
         }
 
-        // Phase 1: Validate syntax and check for duplicates
+        // Validate snack orders if present
+        if (snackOrders != null) {
+            for (SnackOrder order : snackOrders) {
+                if (order == null || order.getSnack() == null) {
+                    throw new IllegalArgumentException("Snack order contains invalid snack item.");
+                }
+                if (order.getQuantity() <= 0) {
+                    throw new IllegalArgumentException("Snack quantity must be greater than 0.");
+                }
+            }
+        }
+
+        // Phase 1: Validate seat syntax and check for duplicates
         StringBuilder syntaxErrors = new StringBuilder();
         Set<String> uniqueCodes = new HashSet<>();
         String[] normCodes = new String[seatCodes.length];
@@ -304,8 +347,8 @@ public class TheatreDao {
                     throw new IllegalArgumentException("Booking failed. Please fix the following issues:\n" + conflictErrors);
                 }
 
-                // Phase 3: Calculate price
-                double totalAmount = Booking.computeTotal(normCodes, couponCode);
+                // Phase 3: Calculate price (Tickets + Snacks - Ticket Coupon Discount)
+                double totalAmount = Booking.computeGrandTotal(normCodes, couponCode, snackOrders);
                 String appliedCoupon = Booking.isCouponValid(couponCode) ? couponCode.trim().toUpperCase() : null;
 
                 // Phase 4: Generate collision-safe booking ID
@@ -350,6 +393,11 @@ public class TheatreDao {
                     psBookingSeats.executeBatch();
                 }
 
+                // Phase 6b: Insert booking_snacks in the same transaction
+                if (snackOrders != null && !snackOrders.isEmpty()) {
+                    snackDao.saveBookingSnacks(conn, bookingId, snackOrders);
+                }
+
                 // Phase 7: Update seats table
                 String updateSeatsSql = "UPDATE seats SET is_booked = TRUE, booking_id = ? " +
                         "WHERE show_id = ? AND seat_row = ? AND seat_number = ?";
@@ -364,7 +412,7 @@ public class TheatreDao {
                     psUpdate.executeBatch();
                 }
 
-                // Commit transaction
+                // Commit transaction atomically
                 conn.commit();
 
                 // Update in-memory show grid
@@ -378,7 +426,8 @@ public class TheatreDao {
                         normCodes,
                         totalAmount,
                         appliedCoupon != null ? appliedCoupon : "",
-                        false
+                        false,
+                        snackOrders
                 );
             } catch (SQLException e) {
                 conn.rollback();
@@ -406,11 +455,12 @@ public class TheatreDao {
      * 2. Rejects non-existent or already-cancelled bookings.
      * 3. Marks booking as cancelled.
      * 4. Frees reserved seats in seats table.
-     * 5. Commits transaction and returns updated Booking.
+     * 5. Preserves historical snack orders in booking_snacks.
+     * 6. Commits transaction and returns updated Booking.
      *
      * @param bookingId booking ID to cancel
      * @param showMap   map of showId -> Show entity for memory update
-     * @return cancelled Booking entity with stored amount paid for refund calculation
+     * @return cancelled Booking entity with stored amount paid for 80% refund calculation
      */
     public Booking cancelBooking(String bookingId, Map<Integer, Show> showMap) {
         if (bookingId == null || bookingId.trim().isEmpty()) {
@@ -458,6 +508,9 @@ public class TheatreDao {
                 // Fetch seats for this booking
                 List<String> seats = getSeatsForBooking(conn, normId);
 
+                // Fetch historical snacks for this booking (preserved, NOT deleted)
+                List<SnackOrder> snackOrders = snackDao.getSnacksForBooking(conn, normId);
+
                 // Mark booking cancelled
                 String updateBookingSql = "UPDATE bookings SET is_cancelled = TRUE WHERE booking_id = ?";
                 try (PreparedStatement psUpdateB = conn.prepareStatement(updateBookingSql)) {
@@ -491,7 +544,8 @@ public class TheatreDao {
                         seats.toArray(new String[0]),
                         amountPaid,
                         coupon != null ? coupon : "",
-                        true
+                        true,
+                        snackOrders
                 );
             } catch (SQLException e) {
                 conn.rollback();

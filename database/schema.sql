@@ -63,6 +63,33 @@ CREATE TABLE IF NOT EXISTS booking_seats (
 ) ENGINE=InnoDB;
 
 -- -------------------------------------------------------------
+-- 5. Snacks Table
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS snacks (
+    snack_id VARCHAR(10) PRIMARY KEY,
+    snack_name VARCHAR(100) NOT NULL,
+    category VARCHAR(50) NOT NULL,
+    price DECIMAL(10, 2) NOT NULL,
+    is_available BOOLEAN NOT NULL DEFAULT TRUE
+) ENGINE=InnoDB;
+
+-- -------------------------------------------------------------
+-- 6. Booking Snacks Table
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS booking_snacks (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    booking_id VARCHAR(20) NOT NULL,
+    snack_id VARCHAR(10) NOT NULL,
+    quantity INT NOT NULL,
+    unit_price DECIMAL(10, 2) NOT NULL,
+    subtotal DECIMAL(10, 2) NOT NULL,
+    CONSTRAINT uk_booking_snack UNIQUE (booking_id, snack_id),
+    CONSTRAINT fk_booking_snacks_booking FOREIGN KEY (booking_id) REFERENCES bookings(booking_id) ON DELETE CASCADE,
+    CONSTRAINT fk_booking_snacks_snack FOREIGN KEY (snack_id) REFERENCES snacks(snack_id),
+    CONSTRAINT chk_quantity CHECK (quantity > 0)
+) ENGINE=InnoDB;
+
+-- -------------------------------------------------------------
 -- Seed Data (Idempotent)
 -- -------------------------------------------------------------
 
@@ -106,3 +133,21 @@ INSERT IGNORE INTO seats (show_id, seat_row, seat_number, is_booked) VALUES
 (4, 'C', 1, FALSE), (4, 'C', 2, FALSE), (4, 'C', 3, FALSE), (4, 'C', 4, FALSE), (4, 'C', 5, FALSE), (4, 'C', 6, FALSE), (4, 'C', 7, FALSE), (4, 'C', 8, FALSE),
 (4, 'D', 1, FALSE), (4, 'D', 2, FALSE), (4, 'D', 3, FALSE), (4, 'D', 4, FALSE), (4, 'D', 5, FALSE), (4, 'D', 6, FALSE), (4, 'D', 7, FALSE), (4, 'D', 8, FALSE),
 (4, 'E', 1, FALSE), (4, 'E', 2, FALSE), (4, 'E', 3, FALSE), (4, 'E', 4, FALSE), (4, 'E', 5, FALSE), (4, 'E', 6, FALSE), (4, 'E', 7, FALSE), (4, 'E', 8, FALSE);
+
+-- Seed Snack Menu (Idempotent)
+INSERT INTO snacks (snack_id, snack_name, category, price, is_available) VALUES
+('S001', 'Popcorn', 'Regular', 120.00, TRUE),
+('S002', 'Cheese Popcorn', 'Premium', 180.00, TRUE),
+('S003', 'Nachos', 'Snacks', 150.00, TRUE),
+('S004', 'French Fries', 'Snacks', 100.00, TRUE),
+('S005', 'Veg Sandwich', 'Food', 130.00, TRUE),
+('S006', 'Chicken Sandwich', 'Food', 170.00, TRUE),
+('S007', 'Coke', 'Beverage', 80.00, TRUE),
+('S008', 'Sprite', 'Beverage', 80.00, TRUE),
+('S009', 'Mineral Water', 'Beverage', 40.00, TRUE)
+ON DUPLICATE KEY UPDATE 
+    snack_name = VALUES(snack_name), 
+    category = VALUES(category), 
+    price = VALUES(price), 
+    is_available = VALUES(is_available);
+
